@@ -37,6 +37,7 @@ gitlab_rails['initial_root_password'] = ENV['GITLAB_ROOT_PASSWORD']
 gitlab_rails['usage_ping_enabled'] = false
 gitlab_rails['backup_keep_time'] = 604800   # 7 days
 package['modify_kernel_parameters'] = false
+package['detect_init'] = false            # no systemd in containers; we start runit ourselves
 
 # Low-memory profile (single private team)
 puma['worker_processes'] = 0
@@ -54,6 +55,9 @@ RB
 # Make sure the container hostname resolves (Chef refuses to run otherwise)
 H="$(cat /proc/sys/kernel/hostname 2>/dev/null || echo gitlab)"
 grep -q "$H" /etc/hosts 2>/dev/null || echo "127.0.0.1 $H $H.localdomain" >> /etc/hosts
+
+# Tell GitLab's installer this is a container (no init system)
+touch /.dockerenv
 
 echo ">> starting runit + reconfigure (first boot takes several minutes)"
 /opt/gitlab/embedded/bin/runsvdir-start &
