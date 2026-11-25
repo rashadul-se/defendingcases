@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# glt - private ticketing CLI for GitLab issues (needs curl + jq)
+# Env: GITLAB_URL, GITLAB_TOKEN (PAT with api scope), GLT_PROJECT (id or group/project)
+set -euo pipefail
+: "${GITLAB_URL:?}" "${GITLAB_TOKEN:?}" "${GLT_PROJECT:?}"
+BASE="${GITLAB_URL%/}/api/v4"
+PROJ=$(jq -rn --arg p "$GLT_PROJECT" '$p|@uri')
+
+api() { local m=$1 p=$2; shift 2
+  curl -sS --fail-with-body -X "$m" -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "$@" "$BASE$p" \
+    || { echo "API error: $m $p" >&2; exit 1; }; }
+enc() { jq -rn --arg s "$1" '$s|@uri'; }
+slug() { echo "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]\+/-/g;s/^-\|-$//g' | cut -c1-40; }
+
+set_status() { # N status [extra curl args]
+  local n=$1 st=$2 cur
+  cur=$(api GET "/projects/$PROJ/issues/$n" | jq -r '.labels|map(select(startswith("status:")|not))|join(",")')
+  api PUT "/projects/$PROJ/issues/$n" --data-urlencode "labels=${cur:+$cur,}status:$st" "${@:3}" >/dev/null
+}
+
+cmd_new() {
+  local title=${1:?usage: glt new \"title\" [-d desc] [-t bug|feature|task|security] [-p low|medium|high|critical] [-a user] [-l extra,labels]}; shift
+  local OPTIND=1 desc="" type=task prio=medium asg="" extra="" o
+  while getopts "d:t:p:a:l:" o; do case $o in
+    d) desc=$OPTARG;; t) type=$OPTARG;; p) prio=$OPTARG;; a) asg=$OPTARG;; l) extra=$OPTARG;; esac; done
+  local args=(--data-urlencode "title=$title" --data-urlencode "description=$desc"
+              --data-urlencode "labels=status:open,type:$type,priority:$prio${extra:+,$extra}")
+  if [ -n "$asg" ]; then
+    local uid; uid=$(api GET "/users?username=$(enc "$asg")" | jq -r '.[0].id // empty')
+    [ -n "$uid" ] && args+=(--data-urlencode "assignee_ids[]=$uid")
+  fi
+  api POST "/projects/$PROJ/issues" "${args[@]}" | jq -r '"Created #\(.iid): \(.title)\n\(.web_url)"'
+}
+
+cmd_ls() {
+  local state=opened q="" a
+  for a in "$@"; do case $a in
+    --all) state=all;; --closed) state=closed;; --mine) q+="&scope=assigned_to_me";;
+    --label=*) q+="&labels=$(enc "${a#--label=}")";; esac; done
+  api GET "/projects/$PROJ/issues?state=$state&per_page=50&order_by=updated_at$q" \
+   | jq -r '.[]|"#\(.iid)\t\(.state)\t\(.labels|join(","))\t\(.title)"' | column -t -s $'\t'
+}
+
+cmd_show() {
+  api GET "/projects/$PROJ/issues/$1" | jq -r '"#\(.iid) [\(.state)] \(.title)\nLabels: \(.labels|join(", "))\nAssignee: \([.assignees[].username]|join(", "))\n\(.web_url)\n\n\(.description // "")"'
+  echo "--- comments ---"
+  api GET "/projects/$PROJ/issues/$1/notes?sort=asc" \
+   | jq -r '.[]|select(.system|not)|"[\(.created_at[:16])] \(.author.username): \(.body)"'
+}
+
+cmd_comment() { api POST "/projects/$PROJ/issues/$1/notes" --data-urlencode "body=$2" >/dev/null && echo "Commented on #$1"; }
+cmd_triage()  { set_status "$1" triage;      echo "#$1 -> triage"; }
+cmd_start() {
+  local me; me=$(api GET /user | jq -r .id)
+  set_status "$1" in-progress --data-urlencode "assignee_ids[]=$me"; echo "#$1 -> in-progress (assigned to you)"; }
+cmd_review()  { set_status "$1" review;      echo "#$1 -> review"; }
+cmd_resolve() {
+  local n=$1 note=${2:?usage: glt resolve N \"resolution note\"}
+  cmd_comment "$n" "**Resolution:** $note"
+  set_status "$n" resolved --data-urlencode "state_event=close"; echo "#$n resolved + closed"; }
+cmd_wontfix() { cmd_comment "$1" "**Won't fix:** ${2:-no reason given}"; set_status "$1" wontfix --data-urlencode "state_event=close"; echo "#$1 closed (wontfix)"; }
+cmd_reopen()  { set_status "$1" open --data-urlencode "state_event=reopen"; echo "#$1 reopened"; }
+cmd_time()    { cmd_comment "$1" "/spend $2"; }                       # glt time 12 1h30m
+cmd_link()    { api POST "/projects/$PROJ/issues/$1/links" --data-urlencode "target_project_id=$PROJ" --data-urlencode "target_issue_iid=$2" >/dev/null; echo "#$1 relates to #$2"; }
+
+cmd_branch() {  # creates local branch N-slug and starts the ticket
+  local t; t=$(api GET "/projects/$PROJ/issues/$1" | jq -r .title)
+  git switch -c "$1-$(slug "$t")"; cmd_start "$1"; }
+
+cmd_mr() {      # opens an MR from the current branch that auto-closes the issue on merge
+  local n=$1 br t def
+  br=$(git rev-parse --abbrev-ref HEAD)
+  t=$(api GET "/projects/$PROJ/issues/$n" | jq -r .title)
+  def=$(api GET "/projects/$PROJ" | jq -r .default_branch)
+  git push -u origin "$br"
+  api POST "/projects/$PROJ/merge_requests" \
+    --data-urlencode "source_branch=$br" --data-urlencode "target_branch=$def" \
+    --data-urlencode "title=Resolve \"$t\"" --data-urlencode "description=Closes #$n" \
+    --data-urlencode "remove_source_branch=true" --data-urlencode "squash=true" | jq -r .web_url
+  set_status "$n" review; }
+
+cmd_init() {    # labels, project merge settings, issue templates
+  local L=( "status:open|#428BCA" "status:triage|#F0AD4E" "status:in-progress|#5CB85C" "status:review|#A8D695"
+            "status:resolved|#44AD8E" "status:wontfix|#7F8C8D"
+            "type:bug|#D9534F" "type:feature|#8E44AD" "type:task|#34495E" "type:security|#C0392B"
+            "priority:low|#CCCCCC" "priority:medium|#F1C40F" "priority:high|#E67E22" "priority:critical|#E74C3C" ) l
+  for l in "${L[@]}"; do
+    ( api POST "/projects/$PROJ/labels" --data-urlencode "name=${l%%|*}" --data-urlencode "color=${l##*|}" >/dev/null ) 2>/dev/null || true
+  done
+  api PUT "/projects/$PROJ" -d only_allow_merge_if_pipeline_succeeds=false \
+     -d only_allow_merge_if_all_discussions_are_resolved=true -d remove_source_branch_after_merge=true \
+     -d squash_option=default_on -d merge_method=ff >/dev/null
+  put() { ( api POST "/projects/$PROJ/repository/files/$(enc ".gitlab/issue_templates/$1.md")" \
+      --data-urlencode "branch=$(api GET "/projects/$PROJ" | jq -r .default_branch)" \
+      --data-urlencode "commit_message=Add $1 issue template" --data-urlencode "content@-" >/dev/null ) 2>/dev/null || echo "skip template $1 (empty repo?)"; }
+  put Bug <<'T'
+## Summary
+## Steps to reproduce
+## Expected / actual
+## Environment
+/label ~"type:bug" ~"status:open"
+T
+  put Feature <<'T'
+## Problem / goal
+## Proposed solution
+## Acceptance criteria
+- [ ]
+/label ~"type:feature" ~"status:open"
+T
+  echo "Initialised labels, merge settings, templates."
+}
+
+case "${1:-help}" in
+  new) shift; cmd_new "$@";;   ls) shift; cmd_ls "$@";;   show) cmd_show "$2";;
+  comment) cmd_comment "$2" "$3";;   triage) cmd_triage "$2";;  start) cmd_start "$2";;
+  review) cmd_review "$2";;   resolve) cmd_resolve "$2" "${3:-}";;  wontfix) cmd_wontfix "$2" "${3:-}";;
+  reopen) cmd_reopen "$2";;   time) cmd_time "$2" "$3";;  link) cmd_link "$2" "$3";;
+  branch) cmd_branch "$2";;   mr) cmd_mr "$2";;  init) cmd_init;;
+  *) cat <<'H'
+glt init                         labels + merge settings + issue templates
+glt new "title" [-d desc -t type -p prio -a user -l labels]
+glt ls [--all|--closed|--mine|--label=x]    glt show N
+glt triage|start|review N        glt comment N "text"
+glt resolve N "what fixed it"    glt wontfix N "why"    glt reopen N
+glt branch N   (git branch + start)    glt mr N   (push + MR that closes #N)
+glt time N 1h30m                 glt link N M
+H
+;; esac

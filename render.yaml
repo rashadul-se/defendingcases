@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: gitlab-private
+    runtime: docker
+    plan: pro            # 4 GB RAM = bare minimum. Use "pro plus" (8 GB) for comfort.
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /users/sign_in
+    disk:
+      name: gitlab-data
+      mountPath: /data
+      sizeGB: 50
+    envVars:
+      - key: GITLAB_ROOT_PASSWORD
+        sync: false      # you'll be prompted in the dashboard
+      - key: PORT
+        value: "10000"
+      # optional once you add a custom domain:
+      # - key: EXTERNAL_URL
+      #   value: https://git.example.com
