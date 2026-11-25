@@ -20,6 +20,9 @@ RUN printf '%s\n' \
            && dnf -y install --nogpgcheck gitlab-ce ) ) \
  && dnf clean all
 
+# Chef/Ohai needs these to detect hostname + IP (missing in minimal Fedora image)
+RUN dnf -y install --setopt=install_weak_deps=False hostname iproute net-tools && dnf clean all
+
 COPY entrypoint.sh harden.rb /opt/gl/
 RUN chmod +x /opt/gl/entrypoint.sh
 

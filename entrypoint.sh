@@ -51,6 +51,10 @@ gitlab_rails['env'] = { 'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:100
 eval ENV['GITLAB_OMNIBUS_CONFIG'] if ENV['GITLAB_OMNIBUS_CONFIG']
 RB
 
+# Make sure the container hostname resolves (Chef refuses to run otherwise)
+H="$(cat /proc/sys/kernel/hostname 2>/dev/null || echo gitlab)"
+grep -q "$H" /etc/hosts 2>/dev/null || echo "127.0.0.1 $H $H.localdomain" >> /etc/hosts
+
 echo ">> starting runit + reconfigure (first boot takes several minutes)"
 /opt/gitlab/embedded/bin/runsvdir-start &
 gitlab-ctl reconfigure
