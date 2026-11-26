@@ -1,4 +1,4 @@
-ARG FEDORA_VERSION=45
+ARG FEDORA_VERSION=43
 FROM fedora:${FEDORA_VERSION}
 
 # GitLab only publishes EL packages; the EL9 RPM runs on Fedora (unsupported by GitLab, works in practice).
@@ -21,7 +21,7 @@ RUN printf '%s\n' \
  && dnf clean all
 
 # Chef/Ohai needs these to detect hostname + IP (missing in minimal Fedora image)
-RUN dnf -y install --setopt=install_weak_deps=False hostname iproute net-tools && dnf clean all
+RUN dnf -y install --setopt=install_weak_deps=False hostname iproute net-tools socat && dnf clean all
 
 COPY entrypoint.sh harden.rb /opt/gl/
 RUN chmod +x /opt/gl/entrypoint.sh

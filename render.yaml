@@ -5,7 +5,7 @@ services:
     plan: pro            # 4 GB RAM = bare minimum. Use "pro plus" (8 GB) for comfort.
     region: oregon
     dockerfilePath: ./Dockerfile
-    healthCheckPath: /users/sign_in
+    # no healthCheckPath on purpose: GitLab needs 10-30 min on first boot
     disk:
       name: gitlab-data
       mountPath: /data

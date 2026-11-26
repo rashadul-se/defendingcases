@@ -26,8 +26,8 @@ link_dir /var/log/gitlab log
 cat > /etc/gitlab/gitlab.rb <<'RB'
 external_url ENV['GITLAB_URL']
 letsencrypt['enable'] = false
-nginx['listen_addresses'] = ['0.0.0.0']
-nginx['listen_port'] = ENV.fetch('PORT', '10000').to_i
+nginx['listen_addresses'] = ['127.0.0.1']   # internal only; socat exposes $PORT
+nginx['listen_port'] = 8081
 nginx['listen_https'] = false          # Render terminates TLS
 nginx['proxy_set_headers'] = { 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }
 nginx['real_ip_header'] = 'X-Forwarded-For'
@@ -55,6 +55,12 @@ RB
 # Make sure the container hostname resolves (Chef refuses to run otherwise)
 H="$(cat /proc/sys/kernel/hostname 2>/dev/null || echo gitlab)"
 grep -q "$H" /etc/hosts 2>/dev/null || echo "127.0.0.1 $H $H.localdomain" >> /etc/hosts
+
+# Open Render's port IMMEDIATELY so the deploy is not killed while GitLab runs its
+# first-boot DB migration (10-30 min). socat forwards $PORT -> nginx on 127.0.0.1:8081.
+# Until GitLab is ready, connections are simply refused (just retry).
+socat TCP-LISTEN:"$PORT",bind=0.0.0.0,fork,reuseaddr TCP:127.0.0.1:8081 &
+echo ">> port $PORT open; GitLab still starting - watch for 'GitLab up' below"
 
 # Tell GitLab's installer this is a container (no init system)
 touch /.dockerenv
